@@ -75,3 +75,88 @@ def save(cfg: dict[str, Any]) -> None:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, indent=2, sort_keys=True)
         tmp.replace(paths.config_path())
+
+
+def update(**patch: Any) -> dict[str, Any]:
+    """Shallow-merge patch into the top-level config and persist."""
+    cfg = load()
+    cfg.update(patch)
+    save(cfg)
+    return cfg
+
+
+def update_section(section: str, patch: dict[str, Any]) -> dict[str, Any]:
+    cfg = load()
+    base = cfg.get(section) or {}
+    if isinstance(base, dict):
+        base.update(patch)
+        cfg[section] = base
+    else:
+        cfg[section] = patch
+    save(cfg)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Workspace registry helpers
+# ---------------------------------------------------------------------------
+
+def list_workspaces() -> list[dict[str, Any]]:
+    return load().get("workspaces", [])
+
+
+def get_workspace(repo_id: str) -> dict[str, Any] | None:
+    for ws in list_workspaces():
+        if ws.get("id") == repo_id:
+            return ws
+    return None
+
+
+def workspace_exists_by_path(path: str) -> bool:
+    return any(ws.get("path") == path for ws in list_workspaces())
+
+
+def add_workspace(name: str, path: str, source: str = "local", git_url: str = "") -> dict[str, Any]:
+    cfg = load()
+    ws = {
+        "id": uuid.uuid4().hex[:12],
+        "name": name,
+        "path": path,
+        "source": source,
+        "git_url": git_url,
+        "created": time.time(),
+        "last_sync": None,
+        "last_index_state": "pending",
+        "stats": {},
+    }
+    cfg.setdefault("workspaces", []).append(ws)
+    save(cfg)
+    return ws
+
+
+def update_workspace(repo_id: str, **patch: Any) -> dict[str, Any] | None:
+    cfg = load()
+    for ws in cfg.get("workspaces", []):
+        if ws.get("id") == repo_id:
+            ws.update(patch)
+            save(cfg)
+            return ws
+    return None
+
+
+def remove_workspace(repo_id: str) -> bool:
+    cfg = load()
+    before = len(cfg.get("workspaces", []))
+    cfg["workspaces"] = [ws for ws in cfg.get("workspaces", []) if ws.get("id") != repo_id]
+    save(cfg)
+    return len(cfg["workspaces"]) < before
+
+
+def last_workspace_id() -> str | None:
+    workspaces = list_workspaces()
+    if not workspaces:
+        return None
+    # most recently synced, otherwise most recently created
+    synced = [ws for ws in workspaces if ws.get("last_sync")]
+    pool = synced or workspaces
+    return max(pool, key=lambda ws: ws.get("last_sync") or ws.get("created") or 0).get("id")
