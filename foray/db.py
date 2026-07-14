@@ -106,3 +106,52 @@ def open_index(repo_id: str, create: bool = False) -> sqlite3.Connection:
     if create:
         init_schema(conn)
     return conn
+
+
+# ---------------------------------------------------------------------------
+# meta helpers
+# ---------------------------------------------------------------------------
+
+def meta_get(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return default
+    return json.loads(row["value"])
+
+
+def meta_set(conn: sqlite3.Connection, key: str, value: Any) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps(value)),
+        )
+
+
+# ---------------------------------------------------------------------------
+# cost tracking
+# ---------------------------------------------------------------------------
+
+def record_cost(conn: sqlite3.Connection, stage: str, tokens: int, cost_usd: float, detail: str = "") -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO costs(stage, detail, tokens, cost_usd, created) VALUES(?,?,?,?,?)",
+            (stage, detail, tokens, cost_usd, time.time()),
+        )
+
+
+def cost_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = conn.execute(
+        "SELECT stage, COUNT(*) AS n, SUM(tokens) AS tokens, SUM(cost_usd) AS cost FROM costs GROUP BY stage"
+    ).fetchall()
+    out: dict[str, Any] = {"indexing": {"n": 0, "tokens": 0, "cost": 0.0}, "docs": {"n": 0, "tokens": 0, "cost": 0.0}}
+    for row in rows:
+        out[row["stage"]] = {"n": row["n"], "tokens": row["tokens"] or 0, "cost": round(row["cost"] or 0.0, 6)}
+    return out
+
+
+# ---------------------------------------------------------------------------
+# query helpers
+# ---------------------------------------------------------------------------
+
+def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
+    return [dict(r) for r in rows]
