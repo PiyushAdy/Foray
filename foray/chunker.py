@@ -113,3 +113,88 @@ def language_supported(lang: str) -> bool:
         except Exception:
             LANGUAGE_SUPPORTED_CACHE[lang] = False
     return LANGUAGE_SUPPORTED_CACHE[lang]
+
+
+# ---------------------------------------------------------------------------
+# symbol extraction
+# ---------------------------------------------------------------------------
+
+def _symbol_from_node(node: tree_sitter.Node, kind: str) -> Symbol | None:
+    name_node = node.child_by_field_name("name")
+    if name_node is None:
+        for child in node.children:
+            if child.is_named and child.child_count == 0 and child.type in (
+                "identifier", "property_identifier", "type_identifier", "field_identifier",
+                "variable_name", "constant", "name", "word", "atom", "symbol",
+            ):
+                name_node = child
+                break
+    if name_node is None:
+        for child in node.children:
+            if child.is_named and child.child_count == 0:
+                name_node = child
+                break
+    if name_node is None:
+        return None
+    name = name_node.text.decode("utf-8", errors="replace").strip()
+    if not name or len(name) > 200 or "\n" in name:
+        return None
+    kind_clean = kind.split(".")[-1]
+    return Symbol(kind=kind_clean, name=name, line=node.start_point.row + 1)
+
+
+def extract_symbols(code: bytes, lang: str) -> list[Symbol]:
+    """Extract symbols: bundled tags.scm query first, structural walk fallback.
+
+    Both paths run per-file on fresh trees, so the extractor is stateless
+    and safe across the worker and MCP server processes.
+    """
+    symbols: list[Symbol] = []
+    seen: set[tuple[str, int]] = set()
+    try:
+        language = get_language(lang)
+        query_src = get_tags_query(lang)
+        if query_src:
+            query = tree_sitter.Query(language, query_src)
+            tree = get_parser(lang).parse(code)
+            captures = tree_sitter.QueryCursor(query).captures(tree.root_node)
+            for capture_name, nodes in captures.items():
+                if not capture_name.startswith("definition."):
+                    continue
+                for node in nodes:
+                    sym = _symbol_from_node(node, capture_name)
+                    if sym and (sym.name, sym.line) not in seen:
+                        seen.add((sym.name, sym.line))
+                        symbols.append(sym)
+    except Exception:
+        pass
+
+    if symbols:
+        symbols.sort(key=lambda s: s.line)
+        return symbols
+
+    # Structural fallback: walk the AST for definition-like nodes.
+    # Covers grammars whose tags.scm is sparse (e.g. some TypeScript shapes).
+    try:
+        tree = get_parser(lang).parse(code)
+    except Exception:
+        return []
+
+    def walk(node: tree_sitter.Node) -> None:
+        if node.type in _DEFINITION_NODE_HINTS and (node.start_point.row + 1, node.type) not in seen:
+            kind = "declaration"
+            for part in node.type.split("_"):
+                if part in ("function", "method", "class", "interface", "struct", "enum", "module", "type", "impl"):
+                    kind = part
+                    break
+            sym = _symbol_from_node(node, f"definition.{kind}")
+            if sym and (sym.name, sym.line) not in seen:
+                seen.add((sym.name, sym.line))
+                symbols.append(sym)
+        for child in node.children:
+            if child.is_named:
+                walk(child)
+
+    walk(tree.root_node)
+    symbols.sort(key=lambda s: s.line)
+    return symbols
