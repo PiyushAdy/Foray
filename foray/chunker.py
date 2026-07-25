@@ -198,3 +198,166 @@ def extract_symbols(code: bytes, lang: str) -> list[Symbol]:
     walk(tree.root_node)
     symbols.sort(key=lambda s: s.line)
     return symbols
+
+
+# ---------------------------------------------------------------------------
+# chunking
+# ---------------------------------------------------------------------------
+
+def _line_of(code: bytes, byte_offset: int) -> int:
+    return code[:byte_offset].count(b"\n") + 1
+
+
+def _top_level_segments(tree: tree_sitter.Tree, code: bytes) -> list[tuple[int, int, int, int]]:
+    """Segments as (start_byte, end_byte, start_line, end_line)."""
+    segments: list[tuple[int, int, int, int]] = []
+    for child in tree.root_node.children:
+        if child.end_byte - child.start_byte == 0:
+            continue
+        segments.append(
+            (child.start_byte, child.end_byte, child.start_point.row + 1, child.end_point.row + 1)
+        )
+    return _merge_tiny(segments, code)
+
+
+def _merge_tiny(segments: list[tuple[int, int, int, int]], code: bytes) -> list[tuple[int, int, int, int]]:
+    """Merge consecutive small segments so chunks stay meaningful."""
+    if not segments:
+        return segments
+    merged: list[tuple[int, int, int, int]] = []
+    buf = list(segments[0])
+    for seg in segments[1:]:
+        buf_len = buf[1] - buf[0]
+        seg_len = seg[1] - seg[0]
+        if buf_len < _MIN_CHUNK_CHARS or seg_len < _MIN_CHUNK_CHARS:
+            buf[1] = seg[1]
+            buf[3] = seg[3]
+        else:
+            merged.append(tuple(buf))
+            buf = list(seg)
+    merged.append(tuple(buf))
+    return merged
+
+
+def _char_split(start_byte: int, end_byte: int, code: bytes, path: str, lang: str) -> list[Chunk]:
+    """Recursive character splitter: split oversized nodes on line boundaries."""
+    text = code[start_byte:end_byte].decode("utf-8", errors="replace")
+    base_line = _line_of(code, start_byte)
+    lines = text.split("\n")
+    pieces: list[Chunk] = []
+    buf: list[str] = []
+    buf_len = 0
+    buf_start = base_line
+
+    def flush() -> None:
+        nonlocal buf, buf_len, buf_start
+        if not buf:
+            return
+        content = "\n".join(buf).strip()
+        if content:
+            pieces.append(
+                Chunk(
+                    chunk_id="",
+                    path=path,
+                    start_line=buf_start,
+                    end_line=buf_start + len(buf) - 1,
+                    language=lang,
+                    content=content,
+                )
+            )
+        buf, buf_len = [], 0
+        buf_start = 0  # set by caller below
+
+    current_line = base_line
+    for i, line in enumerate(lines):
+        if buf_len > _TOKEN_BUDGET:
+            flush()
+            buf_start = current_line
+        buf.append(line)
+        buf_len += len(line) + 1
+        current_line += 1
+    flush()
+    # fix chunk ids and enforce recursion guard
+    out: list[Chunk] = []
+    for i, piece in enumerate(pieces):
+        piece.chunk_id = f"{path}:{piece.start_line}:{piece.end_line}:{i}"
+        if len(piece.content) > _TOKEN_BUDGET * 2:
+            # extremely rare: hard-split by fixed windows
+            step = _TOKEN_BUDGET
+            for j in range(0, len(piece.content), step):
+                window = piece.content[j : j + step]
+                out.append(
+                    Chunk(
+                        chunk_id=f"{path}:{piece.start_line}:{piece.end_line}:{i}:{j}",
+                        path=path,
+                        start_line=piece.start_line + piece.content[:j].count("\n"),
+                        end_line=piece.start_line + piece.content[: j + step].count("\n"),
+                        language=lang,
+                        content=window,
+                    )
+                )
+        else:
+            out.append(piece)
+    return out
+
+
+def chunk_file(code: bytes, rel_path: str, lang: str) -> list[Chunk]:
+    """Produce chunks for one file: AST-first, hybrid fallback."""
+    try:
+        parser = get_parser(lang)
+        tree = parser.parse(code)
+    except Exception:
+        tree = None
+
+    symbols = extract_symbols(code, lang)
+
+    chunks: list[Chunk] = []
+    if tree is not None and tree.root_node.child_count > 0:
+        segments = _top_level_segments(tree, code)
+        for start_byte, end_byte, start_line, end_line in segments:
+            size = end_byte - start_byte
+            if size > _TOKEN_BUDGET:
+                pieces = _char_split(start_byte, end_byte, code, rel_path, lang)
+                for piece in pieces:
+                    piece.symbols = [s for s in symbols if start_line <= s.line <= end_line]
+                chunks.extend(pieces)
+            else:
+                content = code[start_byte:end_byte].decode("utf-8", errors="replace").strip()
+                if content:
+                    chunks.append(
+                        Chunk(
+                            chunk_id=f"{rel_path}:{start_line}:{end_line}",
+                            path=rel_path,
+                            start_line=start_line,
+                            end_line=end_line,
+                            language=lang,
+                            content=content,
+                            symbols=[s for s in symbols if start_line <= s.line <= end_line],
+                        )
+                    )
+    else:
+        # Plain-text path (markdown, config, or unsupported grammar shape)
+        pieces = _char_split(0, len(code), code, rel_path, lang)
+        for piece in pieces:
+            piece.symbols = symbols
+        chunks.extend(pieces)
+
+    if not chunks:
+        content = code.decode("utf-8", errors="replace").strip()
+        if content:
+            chunks.append(
+                Chunk(
+                    chunk_id=f"{rel_path}:1:{content.count(chr(10)) + 1}",
+                    path=rel_path,
+                    start_line=1,
+                    end_line=content.count("\n") + 1,
+                    language=lang,
+                    content=content,
+                    symbols=symbols,
+                )
+            )
+    return chunks
+
+
+def symbols_text(symbols: list[Symbol]) -> str:
+    return " ".join(s.name for s in symbols)
