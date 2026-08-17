@@ -312,3 +312,209 @@ async def workspace_status_stream(repo_id: str) -> StreamingResponse:
             yield _sse(worker.current_status(repo_id))
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# search & chat
+# ---------------------------------------------------------------------------
+
+@app.post("/api/search")
+async def api_search(req: SearchRequest) -> dict[str, Any]:
+    _require_workspace(req.workspace_id)
+    if not _has_live_index(req.workspace_id):
+        raise HTTPException(status_code=409, detail="this workspace has no index yet")
+    results = await asyncio.to_thread(search.hybrid_search, req.workspace_id, req.query, req.n)
+    return {"results": results}
+
+
+@app.post("/api/chat")
+async def api_chat(req: ChatRequest, raw_request: Request) -> StreamingResponse:
+    _require_workspace(req.workspace_id)
+    if not _has_live_index(req.workspace_id):
+        raise HTTPException(status_code=409, detail="this workspace has no index yet")
+
+    byok = demo.sanitize_byok(req.byok)
+    if demo.is_demo_mode() and not byok:
+        status = demo.rate_limit_status(_client_key(raw_request))
+        if not status["allowed"]:
+            raise HTTPException(
+                status_code=429,
+                detail=f"demo rate limit reached ({status['limit']}/hour). Add your own API key to unlock unlimited queries.",
+            )
+        rate_headers = demo.chat_rate_limit_headers(status)
+    else:
+        rate_headers = {"X-RateLimit-Limit": "none"}
+
+    cfg = config.load()
+    llm_settings = cfg.get("llm", {})
+    history = [ChatMessage(role=m.role, content=m.content) for m in req.history]
+
+    async def event_stream() -> AsyncIterator[str]:
+        try:
+            async for event in llmmod.stream_chat(
+                req.workspace_id,
+                req.question,
+                history,
+                llm_settings,
+                byok=byok,
+            ):
+                yield _sse(event)
+                await asyncio.sleep(0)
+        except Exception as exc:  # noqa: BLE001
+            yield _sse({"type": "error", "message": str(exc)})
+
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **rate_headers}
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+
+
+@app.post("/api/file")
+async def read_file(req: FileRequest) -> dict[str, Any]:
+    """Code context for the right sliding panel, scoped + traversal-safe."""
+    ws = _require_workspace(req.workspace_id)
+    root = Path(ws["path"]).expanduser().resolve()
+    target = (root / req.path).resolve()
+    if not str(target).startswith(str(root)):
+        raise HTTPException(status_code=400, detail="path escapes workspace")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="file not found on disk")
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"unreadable file: {exc}") from exc
+
+    lines = text.split("\n")
+    total = len(lines)
+    start = max(1, req.start_line)
+    end = req.end_line if req.end_line > 0 else total
+    end = min(end, total)
+    window = 160
+    if end - start > window:
+        end = start + window
+    selected = lines[start - 1 : end]
+    language = None
+    from . import chunker as _chunker
+
+    language = _chunker.detect_language(target)
+    return {
+        "path": req.path,
+        "start_line": start,
+        "end_line": end,
+        "total_lines": total,
+        "language": language,
+        "content": "\n".join(selected),
+    }
+
+
+# ---------------------------------------------------------------------------
+# repo map, docs, costs
+# ---------------------------------------------------------------------------
+
+@app.get("/api/workspaces/{repo_id}/map")
+async def repo_map(repo_id: str) -> dict[str, Any]:
+    _require_workspace(repo_id)
+    if not _has_live_index(repo_id):
+        raise HTTPException(status_code=409, detail="this workspace has no index yet")
+    from .graph import repo_map as build_map
+
+    def work() -> dict[str, Any]:
+        conn = dbmod.open_index(repo_id, create=False)
+        try:
+            return build_map(conn)
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(work)
+
+
+@app.get("/api/workspaces/{repo_id}/docs")
+async def get_docs(repo_id: str) -> dict[str, Any]:
+    _require_workspace(repo_id)
+    cached = docs_gen.get_cached_docs(repo_id)
+    estimate = docs_gen.estimate_cost(config.load().get("llm", {}))
+    return {"docs": cached, "estimate": estimate}
+
+
+@app.post("/api/workspaces/{repo_id}/docs")
+async def generate_docs(repo_id: str, request: Request) -> dict[str, Any]:
+    _require_workspace(repo_id)
+    if not _has_live_index(repo_id):
+        raise HTTPException(status_code=409, detail="this workspace has no index yet")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    byok = demo.sanitize_byok(body.get("byok") if isinstance(body, dict) else None)
+    try:
+        result = await asyncio.to_thread(docs_gen.generate_docs, repo_id, byok)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
+
+
+@app.get("/api/workspaces/{repo_id}/costs")
+async def costs(repo_id: str) -> dict[str, Any]:
+    """Permanent indexing/docs costs live in SQLite. Chat costs are
+    session-only (tracked client-side by the UI)."""
+    _require_workspace(repo_id)
+    if not _has_live_index(repo_id):
+        return {"indexing": {"n": 0, "tokens": 0, "cost": 0.0}, "docs": {"n": 0, "tokens": 0, "cost": 0.0}}
+    conn = dbmod.open_index(repo_id, create=False)
+    try:
+        return dbmod.cost_summary(conn)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# static frontend (built by Vite into frontend/dist)
+# ---------------------------------------------------------------------------
+
+def _frontend_dist() -> Path | None:
+    candidates = [
+        Path(__file__).resolve().parent.parent / "frontend" / "dist",
+        Path.cwd() / "frontend" / "dist",
+        Path.cwd() / "dist",
+    ]
+    for c in candidates:
+        if (c / "index.html").is_file():
+            return c
+    return None
+
+
+_DIST = _frontend_dist()
+if _DIST is not None:
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+    _HTML_HEADERS = {"Cache-Control": "no-cache"}
+
+    @app.get("/")
+    async def serve_index() -> FileResponse:
+        return FileResponse(_DIST / "index.html", headers=_HTML_HEADERS)
+
+    @app.get("/favicon.svg")
+    async def serve_favicon() -> FileResponse:
+        return FileResponse(_DIST / "favicon.svg")
+
+    # real app screenshots used by the landing hero
+    _shots_dir = _DIST / "shots"
+    if _shots_dir.is_dir():
+        app.mount("/shots", StaticFiles(directory=_shots_dir), name="shots")
+
+    # SPA routes: explicit catch-alls for every frontend path shape
+    @app.get("/setup")
+    @app.get("/home")
+    @app.get("/workspace/{repo_id}")
+    async def spa_catch_all(repo_id: str = "") -> FileResponse:
+        return FileResponse(_DIST / "index.html", headers=_HTML_HEADERS)
+else:
+
+    @app.get("/")
+    async def no_frontend() -> dict[str, str]:
+        return {
+            "message": "Foray API is running. Build the frontend (cd frontend && npm run build) to serve the UI."
+        }
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    paths.ensure_layout()
