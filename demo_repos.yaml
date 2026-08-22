@@ -1,0 +1,15 @@
+# Hosted demo mode configuration.
+# Read-only showcase: only these pre-indexed repositories appear
+# on the landing page when FORAY_DEMO=1.
+
+repos:
+  - id: ledgerline
+    name: ledgerline
+    description: Double-entry ledger service with Python API, CSV ingest and a Go reconcile worker.
+    languages: [python, javascript, go]
+    loc: 459
+  - id: foray
+    name: foray
+    description: "Foray's own backend: FastAPI indexing pipeline, hybrid search, MCP server."
+    languages: [python, typescript]
+    loc: 5200
