@@ -1,0 +1,206 @@
+@import "tailwindcss";
+@import "@fontsource/geist-sans/400.css";
+@import "@fontsource/geist-sans/500.css";
+@import "@fontsource/geist-sans/600.css";
+@import "@fontsource/geist-sans/700.css";
+@import "@fontsource/geist-mono/400.css";
+@import "@fontsource/geist-mono/500.css";
+
+/*
+  Foray design system.
+  Shape rule (locked): nav elements + badges are full pill; cards/panels 10px;
+  buttons 8px; inputs 8px. One accent color (ember orange) everywhere.
+  Public pages: warm paper light. Workspace: strict zinc dark, IDE density.
+*/
+
+@theme {
+  --font-sans: "Geist Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", "SF Mono", ui-monospace, monospace;
+
+  /* single accent family, saturation kept under 80% */
+  --color-ember-50: #fff7ed;
+  --color-ember-100: #ffedd5;
+  --color-ember-200: #fed7aa;
+  --color-ember-300: #fdba74;
+  --color-ember-400: #fb923c;
+  --color-ember-500: #f97316;
+  --color-ember-600: #ea580c;
+  --color-ember-700: #c2410c;
+
+  /* warm paper scale for public surfaces */
+  --color-paper-50: #faf9f7;
+  --color-paper-100: #f5f4f1;
+  --color-paper-200: #ebe9e4;
+  --color-paper-300: #dedbd4;
+  --color-paper-400: #b9b5ac;
+  --color-paper-500: #8f8b83;
+  --color-paper-600: #6b6862;
+  --color-paper-700: #4a4844;
+  --color-paper-800: #2e2d2a;
+  --color-paper-900: #1b1a18;
+
+  /* zinc-dark workspace scale */
+  --color-ink-50: #f4f4f5;
+  --color-ink-100: #e4e4e7;
+  --color-ink-200: #d4d4d8;
+  --color-ink-300: #a1a1aa;
+  --color-ink-400: #8d8d93;
+  --color-ink-500: #71717a;
+  --color-ink-600: #52525b;
+  --color-ink-700: #3f3f46;
+  --color-ink-800: #27272a;
+  --color-ink-850: #1d1d20;
+  --color-ink-900: #141416;
+  --color-ink-950: #0b0b0c;
+
+  --radius-card: 10px;
+  --radius-control: 8px;
+
+  --ease-snap: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:root {
+  --surface: var(--color-paper-100);
+  --surface-raised: #ffffff;
+  --surface-inset: var(--color-paper-200);
+  --text-primary: var(--color-paper-900);
+  --text-secondary: var(--color-paper-600);
+  --text-tertiary: var(--color-paper-500);
+  --border-hair: rgba(27, 26, 24, 0.1);
+  --border-strong: rgba(27, 26, 24, 0.18);
+}
+
+.dark {
+  --surface: var(--color-ink-950);
+  --surface-raised: var(--color-ink-900);
+  --surface-inset: var(--color-ink-850);
+  --text-primary: var(--color-ink-100);
+  --text-secondary: var(--color-ink-400);
+  --text-tertiary: var(--color-ink-500);
+  --border-hair: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--surface);
+  color: var(--text-primary);
+  font-feature-settings: "ss01", "cv11";
+}
+
+::selection {
+  background: rgba(249, 115, 22, 0.25);
+}
+
+/* thin, unobtrusive scrollbars for IDE-density panes */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 120, 128, 0.35) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(120, 120, 128, 0.32);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* paper grain: fixed, non-interactive, cheap (per taste-skill 6.E) */
+.paper-grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 40;
+  opacity: 0.5;
+  background-image: radial-gradient(rgba(27, 26, 24, 0.045) 1px, transparent 1px);
+  background-size: 3px 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@keyframes foray-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-inset) 25%,
+    color-mix(in oklab, var(--surface-inset), #ffffff 14%) 50%,
+    var(--surface-inset) 75%
+  );
+  background-size: 200% 100%;
+  animation: foray-shimmer 1.4s ease-in-out infinite;
+}
+
+/* chat streaming caret */
+.stream-caret::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--color-ember-500);
+  border-radius: 1.5px;
+  animation: caret-blink 0.9s steps(1) infinite;
+}
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* code syntax tinting (light touch, no heavy theme) */
+.code-pane {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  tab-size: 4;
+}
+.code-pane .tok-kw {
+  color: var(--color-ember-600);
+}
+.dark .code-pane .tok-kw {
+  color: var(--color-ember-400);
+}
+.code-pane .tok-str {
+  color: #3f7d4e;
+}
+.dark .code-pane .tok-str {
+  color: #7fb98a;
+}
+.code-pane .tok-com {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+.code-pane .tok-fn {
+  color: #3b6ea5;
+}
+.dark .code-pane .tok-fn {
+  color: #7aa7d8;
+}
